@@ -1,0 +1,25 @@
+{
+  "mode": "sender",
+  "pidFile": "sender.pid",
+  "logFile": "sender.log",
+  "workDir": ".",
+  "exe": "net-kafka-repeater",
+  "relay": {
+    "address": "0.0.0.0:2000",
+    "password": "Testing",
+    "ack": true,
+    "fifo": true,
+    "mode": "tcp"
+  },
+  "topic": {
+    "topic": "xxxxx",
+    "params": {
+      "bootstrap.servers": "127.0.0.1:9092",
+      "broker.address.family": "v4",
+      "group.id": "test",
+      "session.timeout.ms": 6000,
+      "auto.offset.reset": "earlies"
+
+    }
+  }
+}

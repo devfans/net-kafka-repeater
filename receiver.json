@@ -1,0 +1,20 @@
+{
+  "mode": "receiver",
+  "pidFile": "receiver.pid",
+  "logFile": "receiver.log",
+  "workDir": ".",
+  "exe": "net-kafka-repeater",
+  "relay": {
+    "address": "0.0.0.0:2000",
+    "password": "xxxxxxxxxx",
+    "ack": true,
+    "fifo": true,
+    "mode": "tcp"
+  },
+  "topic": {
+    "topic": "xxxxx",
+    "params": {
+      "bootstrap.servers": "127.0.0.0:9092"
+    }
+  }
+}

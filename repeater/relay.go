@@ -9,6 +9,7 @@ import (
   "errors"
 
   "math/rand"
+  "github.com/confluentinc/confluent-kafka-go/kafka"
 )
 
 // message struct
@@ -55,9 +56,15 @@ type Receiver struct {
   config        *RelayConfig
 }
 
+type ISession interface {
+  SendMessage([]byte) (int, error)
+}
+
 type Sender struct {
   consumer      *TopicConsumer
   config        *RelayConfig
+
+  cs            ISession
 }
 
 type Session struct {
@@ -97,6 +104,11 @@ func (sess *TcpSession) connect(config *RelayConfig) {
   auth := sess.Sess.MakeAuthMessage(true, config)
   sess.Send(auth)
   log.Println("Sent login request")
+}
+
+func (sess *TcpSession) SendMessage(data []byte) (int, error) {
+  msg := sess.Sess.MakeMessage(data)
+  return sess.Send(msg)
 }
 
 func (sess *TcpSession) Send(data []byte) (int, error) {
@@ -149,16 +161,15 @@ func (cs *Session) MakeAckMessage (id []byte) []byte {
   return msg
 }
 
-func (cs *Session) MakeMessage () []byte {
+func (cs *Session) MakeMessage (data []byte) []byte {
   msg := []byte{ byte((DATA >> 8) & 0xff), byte(DATA & 0xff)}
-  data := []byte("Testing hello!")
   msg = append(msg, i2b(uint32(10 + len(data)))...)
   msg = append(msg, i2b(rand.Uint32())...)
   msg = append(msg, data...)
   return msg
 }
 
-func (cs *Session) Handle (data []byte, size uint32, config *RelayConfig) ([]byte, error) {
+func (cs *Session) Handle (data []byte, size uint32, config *RelayConfig) (bool, []byte, error) {
   flag := uint32(data[0]) << 8
   flag += uint32(data[1])
 
@@ -167,21 +178,21 @@ func (cs *Session) Handle (data []byte, size uint32, config *RelayConfig) ([]byt
     if password != config.Password {
       log.Printf("Invalid password: %v", password)
       cs.Login = false
-      return cs.MakeAuthMessage(false, config), errors.New("Authentication Failure")
+      return false, cs.MakeAuthMessage(false, config), errors.New("Authentication Failure")
     } else {
       cs.Login = true
       log.Printf("Sender login success from %v", cs.Ip)
-      return nil, nil
+      return false, nil, nil
     }
   }
   if !cs.Login {
-    return cs.MakeAuthMessage(false, config), errors.New("Login required")
+    return false, cs.MakeAuthMessage(false, config), errors.New("Login required")
   }
   if flag == DATA {
     log.Printf("New message: %v", string(data[6:]))
-    return cs.MakeAckMessage(data[6:10]), nil
+    return true, cs.MakeAckMessage(data[6:10]), nil
   } else {
-    return nil, errors.New("Invalid data flag")
+    return false, nil, errors.New("Invalid data flag")
   }
 }
 
@@ -223,7 +234,7 @@ func (r *Receiver) startTcp() {
     sess := &Session { Ip: ip, Login: false }
     tcpSess := &TcpSession { Sess: sess, conn: conn, active: true }
     go func (cs *TcpSession) {
-      csErr := r.handleTcpSession(cs)
+      csErr := r.handleTcpSession(cs, r.producer)
       if csErr != nil {
         log.Println(err)
         cs.Close()
@@ -232,7 +243,7 @@ func (r *Receiver) startTcp() {
   }
 }
 
-func (r *Receiver) handleTcpSession(cs *TcpSession) error {
+func (r *Receiver) handleTcpSession(cs *TcpSession, producer *TopicProducer) error {
   buf := bufio.NewReaderSize(cs.conn, MAX_BUF_SIZE)
   var msg [MAX_MSG_SIZE]byte
   for {
@@ -253,7 +264,11 @@ func (r *Receiver) handleTcpSession(cs *TcpSession) error {
       if err != nil {
         return err
       }
-      res, err := cs.Sess.Handle(data, size, r.config)
+      arrive, res, err := cs.Sess.Handle(data, size, r.config)
+      if arrive {
+        log.Printf("Received message: %v", string(data[10:]))
+        producer.Process(data[10:])
+      }
       if res != nil {
         _, handleErr := cs.Send(res)
         if err != nil {
@@ -273,6 +288,27 @@ func (s *Sender) Start() {
   if s.config.Mode == "tcp" {
     go s.startTcp()
   }
+
+  for {
+    msg := s.consumer.Poll(100)
+    if msg != nil {
+      s.Process(msg)
+    }
+  }
+}
+
+func (s *Sender) Process(msg *kafka.Message) {
+  for {
+    _, err := s.cs.SendMessage(msg.Value)
+    if err != nil {
+      log.Println("Failed to transfer message, will retry again")
+      log.Println(err)
+      time.Sleep(time.Second)
+    } else {
+      log.Printf("Transfered message: %v", string(msg.Value))
+      return
+    }
+  }
 }
 
 func (s *Sender) startTcp() {
@@ -280,11 +316,13 @@ func (s *Sender) startTcp() {
   sigs := make(chan bool, 1)
   tcpSess := &TcpSession { Sess: sess, sigs: sigs }
   tcpSess.ClientInit(s.config)
+  s.cs = tcpSess
 
+  // test
   for {
     time.Sleep(time.Second)
     if tcpSess.active {
-      data := tcpSess.Sess.MakeMessage()
+      data := tcpSess.Sess.MakeMessage([]byte("Testing"))
       _, err := tcpSess.Send(data)
       if err != nil {
         log.Println(err)
