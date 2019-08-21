@@ -102,8 +102,10 @@ func (c *TopicConsumer) Poll(n int) *kafka.Message {
     if e.Code() == kafka.ErrAllBrokersDown {
       log.Fatalf("Kafka consumer is stopping for kafka brokers down!")
     }
+    /*
   default:
     log.Printf("Ignored %v", e)
+    */
   }
   return nil
 }
