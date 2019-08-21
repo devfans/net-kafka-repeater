@@ -24,7 +24,12 @@ type TopicConsumer struct {
 func (p *TopicProducer) Setup(params map[string]interface{}) {
   p.config = &kafka.ConfigMap {}
   for k, v := range params {
-    p.config.SetKey(k, v)
+    switch value := v.(type) {
+    case float64:
+      p.config.SetKey(k, int(value))
+    default:
+      p.config.SetKey(k, value)
+    }
   }
   producer, err := kafka.NewProducer(p.config)
   if err != nil {
@@ -70,7 +75,12 @@ func (p *TopicProducer) process(data []byte) bool {
 func (c *TopicConsumer) Setup(params map[string]interface{}) {
   c.config = &kafka.ConfigMap {}
   for k, v := range params {
-    c.config.SetKey(k, v)
+    switch value := v.(type) {
+    case float64:
+      c.config.SetKey(k, int(value))
+    default:
+      c.config.SetKey(k, value)
+    }
   }
   consumer, err := kafka.NewConsumer(c.config)
   if err != nil {
