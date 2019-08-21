@@ -16,7 +16,7 @@ func main() {
   }
 
   configFileName, _ = filepath.Abs(configFileName)
-  log.Println("Loading config file: %v", configFileName)
+  log.Printf("Loading config file: %v", configFileName)
 
   configFile, err := os.Open(configFileName)
   if err != nil {

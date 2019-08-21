@@ -52,6 +52,32 @@ func (p *TopicProducer) Process(data []byte) {
 }
 
 func (p *TopicProducer) process(data []byte) bool {
+  sig := make(chan bool)
+  go func () {
+    for e:= range p.producer.Events() {
+      switch ev := e.(type) {
+      case *kafka.Message:
+        m := ev
+        if m.TopicPartition.Error != nil {
+          log.Printf("Delivery failed: %v", m.TopicPartition.Error)
+          sig <- false
+        } else {
+          log.Printf("Produced message %v", string(m.Value))
+          sig <- true
+        }
+      }
+    }
+  }()
+
+  p.producer.ProduceChannel() <-&kafka.Message{
+    TopicPartition: kafka.TopicPartition{ Topic: &p.Topic, Partition: kafka.PartitionAny },
+    Value: data,
+    Headers: []kafka.Header{},
+  }
+  return <-sig
+}
+
+func (p *TopicProducer) processFun(data []byte) bool {
   delivery := make(chan kafka.Event)
   err := p.producer.Produce(&kafka.Message{
     TopicPartition: kafka.TopicPartition{ Topic: &p.Topic, Partition: kafka.PartitionAny },
