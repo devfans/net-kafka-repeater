@@ -1,6 +1,10 @@
 package main
 
 import (
+  "os"
+  "log"
+  "path/filepath"
+  "encoding/json"
   "net-kafka-repeater/repeater"
 )
 
@@ -21,7 +25,7 @@ func main() {
   defer configFile.Close()
 
   parser := json.NewDecoder(configFile)
-  var config reapeater.Config
+  var config repeater.Config
   if err := parser.Decode(&config); err != nil {
     log.Fatalln("Failed to parse config file: ", err.Error())
   }
@@ -35,4 +39,6 @@ func main() {
     receiver := repeater.NewReceiver(&config)
     receiver.Start()
   }
+
+  <-make(chan byte)
 }

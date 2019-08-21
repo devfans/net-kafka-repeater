@@ -1,10 +1,47 @@
 package repeater
 
+import (
+  "io"
+  "log"
+  "net"
+  "time"
+  "bufio"
+  "errors"
+
+  "math/rand"
+)
+
+// message struct
+// FLAG  LEN  ID  DATA
+//   2    4   4
 const (
   PASSWORD = "NET-KAFKA-REPEATER"
-  AUTH     = 0xef
-  DATA     = 0xfe
+  AUTH     = 0xef01
+  DATA     = 0xfe01
+  MAX_BUF_SIZE = 0xffffffff
+  MAX_MSG_SIZE = 100000
 )
+
+// convert byte to int
+func b2i(b []byte) uint32 {
+  l := len(b)
+  if l > 4 {
+    log.Fatalf("Overflow %d bytes to uint32\n", l)
+  }
+  var total uint32 = 0
+  for i := l - 1; i >= 0; i-- {
+    total += uint32(b[i]) << uint(8*(l - i - 1))
+  }
+  return total
+}
+
+func i2b(n uint32) []byte {
+  b := make([]byte, 4)
+  for i := 3; i >= 0; i-- {
+    b[i] = byte((n >> uint(8 * (3 - i))) & 0xff)
+  }
+  return b
+}
 
 type RelayConfig struct {
   Address       string
@@ -14,19 +51,138 @@ type RelayConfig struct {
 }
 
 type Receiver struct {
-  producer      TopicProducer
+  producer      *TopicProducer
   config        *RelayConfig
 }
 
 type Sender struct {
-  consumer      TopicConsumer
+  consumer      *TopicConsumer
   config        *RelayConfig
 }
 
-type TcpSession struct {
+type Session struct {
   Login         bool
   Ip            string
+}
+
+type TcpSession struct {
   conn          *net.TCPConn
+
+  Sess          *Session
+  active        bool
+  sigs          chan bool
+}
+
+func (sess *TcpSession) connect(config *RelayConfig) {
+  if sess.active {
+    return
+  }
+
+  conn, err := net.Dial("tcp", config.Address)
+  if err != nil {
+    log.Println(err)
+    sess.sigs <- false
+    return
+  }
+  sess.conn = conn.(*net.TCPConn)
+
+  sess.active = true
+  sess.conn.SetKeepAlive(true)
+  incoming := conn.RemoteAddr().String()
+  log.Printf("Outgoing connection to %v", incoming)
+  ip, _, _ := net.SplitHostPort(incoming)
+  sess.Sess.Ip = ip
+  sess.Sess.Login = false
+  // Login
+  auth := sess.Sess.MakeAuthMessage(true, config)
+  sess.Send(auth)
+  log.Println("Sent login request")
+}
+
+func (sess *TcpSession) Send(data []byte) (int, error) {
+  n, err := sess.conn.Write(data)
+  if err != nil {
+    sess.Close()
+    if sess.sigs != nil {
+      sess.sigs <- false
+    }
+    sess.active = false
+  }
+  return n, err
+}
+
+func (sess *TcpSession) ClientInit(config *RelayConfig) {
+  go func(sigs chan bool) {
+    init := true
+    for {
+      if init {
+        init = false
+        sess.connect(config)
+      } else {
+        <-sigs
+        log.Printf("Connection broken detected, will reconnection in 2 seconds")
+        time.Sleep(2 * time.Second)
+        sess.connect(config)
+      }
+    }
+  } (sess.sigs)
+}
+
+func (cs *Session) MakeAuthMessage (login bool, config *RelayConfig) []byte {
+  msg := []byte{ byte((AUTH >> 8) & 0xff), byte(AUTH & 0xff)}
+  if login {
+    data := []byte(config.Password)
+    msg = append(msg, i2b(uint32(10 + len(data)))...)
+    msg = append(msg, i2b(rand.Uint32())...)
+    msg = append(msg, data...)
+  } else {
+    msg = append(msg, i2b(10)...)
+    msg = append(msg, i2b(rand.Uint32())...)
+  }
+  return msg
+}
+
+func (cs *Session) MakeAckMessage (id []byte) []byte {
+  msg := []byte{ byte((DATA >> 8) & 0xff), byte(DATA & 0xff)}
+  msg = append(msg, i2b(10)...)
+  msg = append(msg, id...)
+  return msg
+}
+
+func (cs *Session) MakeMessage () []byte {
+  msg := []byte{ byte((DATA >> 8) & 0xff), byte(DATA & 0xff)}
+  data := []byte("Testing hello!")
+  msg = append(msg, i2b(uint32(10 + len(data)))...)
+  msg = append(msg, i2b(rand.Uint32())...)
+  msg = append(msg, data...)
+  return msg
+}
+
+func (cs *Session) Handle (data []byte, size uint32, config *RelayConfig) ([]byte, error) {
+  flag := uint32(data[0]) << 8
+  flag += uint32(data[1])
+
+  if flag == AUTH {
+    password := string(data[10:])
+    if password != config.Password {
+      log.Printf("Invalid password: %v", password)
+      cs.Login = false
+      return cs.MakeAuthMessage(false, config), errors.New("Authentication Failure")
+    } else {
+      cs.Login = true
+      log.Printf("Sender login success from %v", cs.Ip)
+      return nil, nil
+    }
+  }
+  if !cs.Login {
+    return cs.MakeAuthMessage(false, config), errors.New("Login required")
+  }
+  if flag == DATA {
+    log.Printf("New message: %v", string(data[6:]))
+    return cs.MakeAckMessage(data[6:10]), nil
+  } else {
+    return nil, errors.New("Invalid data flag")
+  }
 }
 
 func (cs *TcpSession) Close() {
@@ -36,17 +192,17 @@ func (cs *TcpSession) Close() {
 }
 
 func (r *Receiver) Start() {
-  log.Println("Mode: %v Target Address: %v", r.Mode, r.Address)
+  log.Printf("Mode: %v Target Address: %v", r.config.Mode, r.config.Address)
 
-  if r.Mode == "tcp" {
+  if r.config.Mode == "tcp" {
     go r.startTcp()
   }
 }
 
-func (r *Receiver) startTcp {
-  addr, err := net.ResolveTCPAddr("tcp", r.Address)
+func (r *Receiver) startTcp() {
+  addr, err := net.ResolveTCPAddr("tcp", r.config.Address)
   if err != nil {
-    log.Println("Invalid listening address: %v", r.Address)
+    log.Printf("Invalid listening address: %v", r.config.Address)
   }
 
   server, err := net.ListenTCP("tcp", addr)
@@ -61,24 +217,80 @@ func (r *Receiver) startTcp {
       continue
     }
     conn.SetKeepAlive(true)
-    incoming = conn.RemoteAddr().String()
-    log.Println("Incoming connection from %v", incoming)
+    incoming := conn.RemoteAddr().String()
+    log.Printf("Incoming connection from %v", incoming)
     ip, _, _ := net.SplitHostPort(incoming)
-    sess := &TcpSession { conn: conn, Ip: ip, Login: false }
+    sess := &Session { Ip: ip, Login: false }
+    tcpSess := &TcpSession { Sess: sess, conn: conn, active: true }
     go func (cs *TcpSession) {
-      csErr := receiver.handleTcpSession(cs)
+      csErr := r.handleTcpSession(cs)
       if csErr != nil {
+        log.Println(err)
         cs.Close()
       }
-    }(sess)
+    }(tcpSess)
   }
 }
 
 func (r *Receiver) handleTcpSession(cs *TcpSession) error {
+  buf := bufio.NewReaderSize(cs.conn, MAX_BUF_SIZE)
+  var msg [MAX_MSG_SIZE]byte
+  for {
+    meta, err := buf.Peek(6)
+    log.Println(meta)
+    if err != nil {
+      continue
+    }
+    size := b2i(meta[2:6])
+    if uint32(buf.Buffered()) >= size {
+      var data []byte
+      if size > MAX_MSG_SIZE {
+        data = make([]byte, size)
+      } else {
+        data = msg[0:size]
+      }
+      _, err := io.ReadFull(buf, data)
+      if err != nil {
+        return err
+      }
+      res, err := cs.Sess.Handle(data, size, r.config)
+      if res != nil {
+        _, handleErr := cs.Send(res)
+        if err != nil {
+          return handleErr
+        }
+      }
+      if err != nil {
+        return err
+      }
+    }
+  }
 }
 
 func (s *Sender) Start() {
-  log.Println("Mode: %v Target Address: %v", s.Mode, s.Address)
+  log.Printf("Mode: %v Target Address: %v", s.config.Mode, s.config.Address)
+
+  if s.config.Mode == "tcp" {
+    go s.startTcp()
+  }
+}
+
+func (s *Sender) startTcp() {
+  sess := &Session { Login: false }
+  sigs := make(chan bool, 1)
+  tcpSess := &TcpSession { Sess: sess, sigs: sigs }
+  tcpSess.ClientInit(s.config)
+
+  for {
+    time.Sleep(time.Second)
+    if tcpSess.active {
+      data := tcpSess.Sess.MakeMessage()
+      _, err := tcpSess.Send(data)
+      if err != nil {
+        log.Println(err)
+      }
+    }
+  }
 }
 
 func NewReceiver(config *Config) *Receiver {
@@ -94,10 +306,9 @@ func parseRelay(config *Config) *RelayConfig {
     Mode:     "tcp",
     Address:  "0.0.0.0:2000",
     Password: PASSWORD,
-    Ack:      true
-  }
+    Ack:      true }
   var c map[string] interface {}
-  if config.Relay ! = nil {
+  if config.Relay != nil {
     c = config.Relay
   } else {
     c = make(map[string]interface{})
@@ -109,7 +320,7 @@ func parseRelay(config *Config) *RelayConfig {
     if modeName == "tcp" || modeName == "kcp" {
       rc.Mode = mode.(string)
     } else {
-      log.Println("Invalid mode: %v will use tcp instead.", modename)
+      log.Printf("Invalid mode: %v will use tcp instead.", modeName)
     }
   }
 
@@ -123,7 +334,7 @@ func parseRelay(config *Config) *RelayConfig {
     rc.Password = password.(string)
   }
 
-  if ack, ok := c["ack"]
+  ack, ok := c["ack"]
   if ok {
     rc.Ack = ack.(bool)
   }
