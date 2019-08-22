@@ -1,5 +1,16 @@
 package repeater
 
+// Configuration for the repeater
+//
+// 'Exe' is the 'net-kafka-repeater' executable path
+//
+// Default 'WorkDir' (working directory) is current path
+//
+// 'Mode' specifies a 'sender' or a 'receiver'
+//
+// 'Relay' contains configurations for the netwokring
+//
+// 'Topic' containers kafka configurations
 type Config struct {
   Exe            string
   PidFile        string

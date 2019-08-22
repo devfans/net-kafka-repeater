@@ -13,7 +13,7 @@ import (
   "github.com/confluentinc/confluent-kafka-go/kafka"
 )
 
-// message struct
+// Message struct
 // FLAG  LEN  ID  DATA
 //   2    4   4
 const (
@@ -24,7 +24,7 @@ const (
   MAX_MSG_SIZE = 100000
 )
 
-// convert byte to int
+// Convert byte slice to uint32
 func b2i(b []byte) uint32 {
   l := len(b)
   if l > 4 {
@@ -37,6 +37,7 @@ func b2i(b []byte) uint32 {
   return total
 }
 
+// Convert uint32 to byte slice
 func i2b(n uint32) []byte {
   b := make([]byte, 4)
   for i := 3; i >= 0; i-- {
@@ -45,6 +46,13 @@ func i2b(n uint32) []byte {
   return b
 }
 
+// RelayConfig is the configuration of the networking
+//
+// 'Mode' specifies using 'tcp' or 'kcp'(UDP based)
+//
+// 'Password' specifies the authentication credential for new connection
+//
+// 'Ack' specifies if need to confirm each message's delivery from receiver before next message goes out.(Not implemented yet)
 type RelayConfig struct {
   Address       string
   Mode          string
@@ -52,15 +60,20 @@ type RelayConfig struct {
   Ack           bool
 }
 
+// Receiver containers a kafka topic producer and a pointer to relayer configurations
 type Receiver struct {
   producer      *TopicProducer
   config        *RelayConfig
 }
 
+// Sesssion interface for sending message to remote receiver
 type ISession interface {
   SendMessage([]byte) (int, error)
 }
 
+// Sender containers a kafka topic consumer and a pointer to relay configuraitons
+//
+// 'cs' is sink handler to send the data out
 type Sender struct {
   consumer      *TopicConsumer
   config        *RelayConfig
@@ -68,6 +81,9 @@ type Sender struct {
   cs            ISession
 }
 
+// Session is designed to maintain a reliable networking connection with is a tcp connectin or kcp simulated connection
+//
+// 'sigs' is signal chan to indicate the status change of the connection for reconnecting
 type Session struct {
   conn          net.Conn
 
@@ -77,6 +93,7 @@ type Session struct {
   sigs          chan bool
 }
 
+// Create outgoing connection. When a connection is established successfully, the authentication request will be sent
 func (sess *Session) connect(config *RelayConfig) bool {
   if sess.active {
     return true
@@ -112,11 +129,14 @@ func (sess *Session) connect(config *RelayConfig) bool {
   return true
 }
 
+// Send Kafka message out to receiver (Only the message payload without headers)
 func (sess *Session) SendMessage(data []byte) (int, error) {
   msg := sess.MakeMessage(data)
+  log.Println("Sending message: ", string(data))
   return sess.Send(msg)
 }
 
+// Send raw bytes out to receiver
 func (sess *Session) Send(data []byte) (int, error) {
   n, err := sess.conn.Write(data)
   if err != nil {
@@ -129,6 +149,7 @@ func (sess *Session) Send(data []byte) (int, error) {
   return n, err
 }
 
+// Setup the session network connection
 func (sess *Session) Connect(config *RelayConfig) {
   init := make(chan bool)
   defer close(init)
@@ -169,6 +190,7 @@ func (sess *Session) Connect(config *RelayConfig) {
   return
 }
 
+// Compose the Authentation message
 func (sess *Session) MakeAuthMessage (login bool, config *RelayConfig) []byte {
   msg := []byte{ byte((AUTH >> 8) & 0xff), byte(AUTH & 0xff)}
   if login {
@@ -183,6 +205,7 @@ func (sess *Session) MakeAuthMessage (login bool, config *RelayConfig) []byte {
   return msg
 }
 
+// Compose the Acknowlegde message for a kafka message with a id (random uint32) of the message
 func (sess *Session) MakeAckMessage (id []byte) []byte {
   msg := []byte{ byte((DATA >> 8) & 0xff), byte(DATA & 0xff)}
   msg = append(msg, i2b(10)...)
@@ -190,6 +213,7 @@ func (sess *Session) MakeAckMessage (id []byte) []byte {
   return msg
 }
 
+// Compose the kafka message to send out
 func (sess *Session) MakeMessage (data []byte) []byte {
   msg := []byte{ byte((DATA >> 8) & 0xff), byte(DATA & 0xff)}
   msg = append(msg, i2b(uint32(10 + len(data)))...)
@@ -198,6 +222,13 @@ func (sess *Session) MakeMessage (data []byte) []byte {
   return msg
 }
 
+// Handle a message received from a sender
+//
+// If the message flag(the first two bytes) indicates it's authentication, then process login.
+//
+// If it's kafka message and deliver it to kafka producer. Login status will be checked before the delivery.
+//
+// Anything else, drop the connection
 func (sess *Session) Handle (data []byte, size uint32, config *RelayConfig) (bool, []byte, error) {
   flag := uint32(data[0]) << 8
   flag += uint32(data[1])
@@ -225,6 +256,7 @@ func (sess *Session) Handle (data []byte, size uint32, config *RelayConfig) (boo
   }
 }
 
+// Close the networking connection
 func (sess *Session) Close() {
   if sess.conn == nil {
     return
@@ -237,6 +269,7 @@ func (sess *Session) Close() {
   }
 }
 
+// Start the receiver, will would create listeners and setup kafka producer
 func (r *Receiver) Start() {
   log.Printf("Mode: %v Target Address: %v", r.config.Mode, r.config.Address)
 
@@ -248,6 +281,7 @@ func (r *Receiver) Start() {
   }
 }
 
+// Create kcp connection listener
 func (r *Receiver) startKcp() {
   server, err := kcp.Listen(r.config.Address)
   if err != nil {
@@ -273,6 +307,7 @@ func (r *Receiver) startKcp() {
   }
 }
 
+// Create tcp connection listener
 func (r *Receiver) startTcp() {
   addr, err := net.ResolveTCPAddr("tcp", r.config.Address)
   if err != nil {
@@ -305,12 +340,13 @@ func (r *Receiver) startTcp() {
   }
 }
 
+// Initialize a for loop to handle IO with the session connection
 func (r *Receiver) handleSession(cs *Session, producer *TopicProducer) error {
   buf := bufio.NewReaderSize(cs.conn, MAX_BUF_SIZE)
   var msg [MAX_MSG_SIZE]byte
   for {
     meta, err := buf.Peek(6)
-    log.Println(meta)
+    // log.Println(meta)
     if err != nil {
       log.Println(err)
       time.Sleep(time.Second)
@@ -352,6 +388,9 @@ func (r *Receiver) handleSession(cs *Session, producer *TopicProducer) error {
   }
 }
 
+// Start the sender. Would setup a outgoing connection to receiver and maintain it.
+//
+// It will also create a kafka consumer and subscribe to the desire topic.
 func (s *Sender) Start() {
   log.Printf("Mode: %v Target Address: %v", s.config.Mode, s.config.Address)
   sigs := make(chan bool, 1)
@@ -365,6 +404,7 @@ func (s *Sender) Start() {
 
   sess.Connect(s.config)
   // test
+  /*
   go func() {
     for {
       time.Sleep(time.Second)
@@ -379,6 +419,7 @@ func (s *Sender) Start() {
       }
     }
   } ()
+  */
 
   for {
     msg := s.consumer.Poll(100)
@@ -388,6 +429,7 @@ func (s *Sender) Start() {
   }
 }
 
+// Process would send the kafka message out to receiver, it will retry in 1 second if it failed.
 func (s *Sender) Process(msg *kafka.Message) {
   for {
     _, err := s.cs.SendMessage(msg.Value)
@@ -402,6 +444,7 @@ func (s *Sender) Process(msg *kafka.Message) {
   }
 }
 
+// Create a receiver and parse the networking configurations
 func NewReceiver(config *Config) *Receiver {
   receiver := & Receiver {}
   // parse config.relay
@@ -410,6 +453,9 @@ func NewReceiver(config *Config) *Receiver {
   return receiver
 }
 
+// Parse the relay networking configuration.
+//
+// It returns a RelayConfig pointer
 func parseRelay(config *Config) *RelayConfig {
   rc := & RelayConfig {
     Mode:     "tcp",
@@ -452,6 +498,7 @@ func parseRelay(config *Config) *RelayConfig {
   return rc
 }
 
+// Create a sender and parse the relay networking configuration forit
 func NewSender(config *Config) *Sender {
   sender := & Sender {}
 

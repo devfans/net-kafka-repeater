@@ -6,10 +6,17 @@ import (
   "github.com/confluentinc/confluent-kafka-go/kafka"
 )
 
-
+// TopicProducer is a wrapper of the librdkafka producer.
+//
+// It's holding a kafka ConfigMap annd a kafka producer
+//
+// Order is to indicates the message should be delivered successfully to kafka before the next one
+//
+// 'toChannel' specified if to use producer Events to receive kafka delivery events
+//
+// 'delivery' is the golang channel to receive the kafka delivery event
 type TopicProducer struct {
   Topic      string
-  params     map[string] interface {}
   config     *kafka.ConfigMap
   producer   *kafka.Producer
   Order      bool
@@ -18,13 +25,14 @@ type TopicProducer struct {
   toChannel  bool
 }
 
+// TopicConsumer is wrapper of librdkafka consumer, it's holding a kafka consumer and a kafka ConfigMap
 type TopicConsumer struct {
   Topic      string
-  params     map[string] interface {}
   config     *kafka.ConfigMap
   consumer   *kafka.Consumer
 }
 
+// When order is off, the message would be delivered without blocking
 func (p *TopicProducer) produce(data []byte) {
   msg := &kafka.Message {
     TopicPartition: kafka.TopicPartition{ Topic: &p.Topic, Partition: kafka.PartitionAny },
@@ -43,6 +51,7 @@ func (p *TopicProducer) produce(data []byte) {
   }
 }
 
+// Setup the producer with configurations
 func (p *TopicProducer) Setup(config *Config) {
   var extra map[string]interface{}
   p.Topic, p.config, extra = parseKafkaConfig(config)
@@ -84,6 +93,9 @@ func (p *TopicProducer) Setup(config *Config) {
   }
 }
 
+// Process is the entry function to handle the task of delivery a message to kakfa
+//
+// When 'order' is true, it will block until it received the delivery success event
 func (p *TopicProducer) Process(data []byte) {
   //TODO: This is a blocking way to wrap a non-blocking producer
   // When FIFO is not required, a pential speed up here
@@ -108,6 +120,7 @@ func (p *TopicProducer) Process(data []byte) {
   }
 }
 
+// Handler of kafka delivery event, when the delivery failed, a new delivery will be initalized.
 func (p *TopicProducer) handleEvent(event kafka.Event) {
   switch ev := event.(type) {
   case *kafka.Message:
@@ -121,6 +134,7 @@ func (p *TopicProducer) handleEvent(event kafka.Event) {
   }
 }
 
+// A blocking delivery of kafka message using kafka ProduceChannel for queuing
 func (p *TopicProducer) process(data []byte) bool {
   sig := make(chan bool)
   defer close(sig)
@@ -149,6 +163,7 @@ func (p *TopicProducer) process(data []byte) bool {
   return <-sig
 }
 
+// A blocking delivery of kafka message with custo golang channel to receive kafka event
 func (p *TopicProducer) processAlt(data []byte) bool {
   delivery := make(chan kafka.Event)
   defer close(delivery)
@@ -172,6 +187,7 @@ func (p *TopicProducer) processAlt(data []byte) bool {
   return true
 }
 
+// Setup a TopicConsunmer with kafka configurations, and subscribe to topics
 func (c *TopicConsumer) Setup(config *Config) {
   c.Topic, c.config, _ = parseKafkaConfig(config)
   consumer, err := kafka.NewConsumer(c.config)
@@ -183,6 +199,7 @@ func (c *TopicConsumer) Setup(config *Config) {
   c.consumer.SubscribeTopics([]string{c.Topic}, nil)
 }
 
+// Poll would call the kafka consumer's Poll to retrieve a kafka message
 func (c *TopicConsumer) Poll(n int) *kafka.Message {
   ev := c.consumer.Poll(n)
   switch e:= ev.(type) {
@@ -202,6 +219,7 @@ func (c *TopicConsumer) Poll(n int) *kafka.Message {
   return nil
 }
 
+// Parser of kafka configuration, it will convert the json configuration to valid kafka configurations
 func parseKafkaConfig (config *Config) (string, *kafka.ConfigMap, map[string]interface{}) {
   var c map[string] interface {}
   if config.Topic != nil {
@@ -246,6 +264,7 @@ func parseKafkaConfig (config *Config) (string, *kafka.ConfigMap, map[string]int
   return topic.(string), configMap, extra
 }
 
+// Create a TopicProducer instance and set it up.
 func NewTopicProducer(config *Config) *TopicProducer {
   producer := &TopicProducer { toChannel: true, Order: true }
   producer.Setup(config)
@@ -253,6 +272,7 @@ func NewTopicProducer(config *Config) *TopicProducer {
   return producer
 }
 
+// Create a TopicConsumer instance and set it up
 func NewTopicConsumer(config *Config) *TopicConsumer {
   consumer := &TopicConsumer {}
   consumer.Setup(config)
