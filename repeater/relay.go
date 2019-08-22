@@ -97,6 +97,7 @@ func (sess *Session) connect(config *RelayConfig) bool {
     sess.sigs <- false
     return false
   }
+  sess.active = true
   return true
 }
 
@@ -352,7 +353,6 @@ func (s *Sender) Start() {
   }
 
   sess.Connect(s.config)
-  sess.active = true
   incoming := sess.conn.RemoteAddr().String()
   log.Printf("Outgoing connection from %v", incoming)
   ip, _, _ := net.SplitHostPort(incoming)
