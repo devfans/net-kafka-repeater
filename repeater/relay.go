@@ -77,21 +77,27 @@ type Session struct {
   sigs          chan bool
 }
 
-func (sess *Session) connectTcp(config *RelayConfig) {
+func (sess *Session) connect(config *RelayConfig) bool {
   if sess.active {
-    return
+    return true
+  }
+  var err error
+  if config.Mode == "kcp" {
+    sess.conn, err = kcp.Dial(config.Address)
+  } else {
+    conn, err := net.Dial("tcp", config.Address)
+    if err == nil {
+      conn.(*net.TCPConn).SetKeepAlive(true)
+      sess.conn = conn
+    }
   }
 
-  conn, err := net.Dial("tcp", config.Address)
   if err != nil {
-    log.Println(err)
+    log.Println("Failed to connect: ", err)
     sess.sigs <- false
-    return
+    return false
   }
-  conn.(*net.TCPConn).SetKeepAlive(true)
-
-  sess.conn = conn
-
+  return true
 }
 
 func (sess *Session) SendMessage(data []byte) (int, error) {
@@ -111,30 +117,44 @@ func (sess *Session) Send(data []byte) (int, error) {
   return n, err
 }
 
-func (sess *Session) TcpConnect(config *RelayConfig, init chan bool) {
-  go func(sigs chan bool) {
+func (sess *Session) Connect(config *RelayConfig) {
+  init := make(chan bool)
+  defer close(init)
+  reinit := make(chan bool)
+
+  go func(sigs chan bool, siginit chan bool) {
     starting := true
     for {
       if starting {
         starting = false
-        sess.connectTcp(config)
-        init <- true
+        siginit <- sess.connect(config)
       } else {
         <-sigs
         log.Printf("Connection broken detected, will reconnection in 2 seconds")
         time.Sleep(2 * time.Second)
-        sess.connectTcp(config)
+        siginit <- sess.connect(config)
       }
     }
-  } (sess.sigs)
-}
+  } (sess.sigs, reinit)
 
-func (sess *Session) KcpConnect(config *RelayConfig) {
-  var err error
-  sess.conn, err = kcp.Dial(config.Address)
-  if err != nil {
-    log.Fatalln("Failed to init kcp session: ", err)
-  }
+  go func(sigs chan bool, active chan bool) {
+    inited := false
+    for {
+      success := <-sigs
+      if success {
+        if !inited {
+          inited = true
+          active<- true
+        }
+        log.Println("Connection ready")
+      } else {
+        log.Println("Connection not ready with failure")
+      }
+    }
+  } (reinit, init)
+
+  <-init
+  return
 }
 
 func (sess *Session) MakeAuthMessage (login bool, config *RelayConfig) []byte {
@@ -329,13 +349,9 @@ func (s *Sender) Start() {
 
   if s.config.Mode == "kcp" {
     log.Println("Using kcp mode")
-    sess.KcpConnect(s.config)
-  } else {
-    init := make(chan bool)
-    sess.TcpConnect(s.config, init)
-    <-init
   }
 
+  sess.Connect(s.config)
   sess.active = true
   incoming := sess.conn.RemoteAddr().String()
   log.Printf("Outgoing connection from %v", incoming)
@@ -397,7 +413,8 @@ func parseRelay(config *Config) *RelayConfig {
     Mode:     "tcp",
     Address:  "0.0.0.0:2000",
     Password: PASSWORD,
-    Ack:      true }
+    Ack:      true,
+  }
   var c map[string] interface {}
   if config.Relay != nil {
     c = config.Relay

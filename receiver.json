@@ -8,11 +8,11 @@
     "address": "0.0.0.0:2000",
     "password": "xxxxxxxxxx",
     "ack": true,
-    "fifo": true,
     "mode": "tcp"
   },
   "topic": {
     "topic": "xxxxx",
+    "order": true,
     "params": {
       "bootstrap.servers": "127.0.0.1:9092"
     }

@@ -12,6 +12,10 @@ type TopicProducer struct {
   params     map[string] interface {}
   config     *kafka.ConfigMap
   producer   *kafka.Producer
+  Order      bool
+
+  delivery   chan kafka.Event
+  toChannel  bool
 }
 
 type TopicConsumer struct {
@@ -21,24 +25,98 @@ type TopicConsumer struct {
   consumer   *kafka.Consumer
 }
 
+func (p *TopicProducer) produce(data []byte) {
+  msg := &kafka.Message {
+    TopicPartition: kafka.TopicPartition{ Topic: &p.Topic, Partition: kafka.PartitionAny },
+    Value: data,
+    Headers: []kafka.Header{},
+  }
+
+  if p.toChannel {
+    p.producer.ProduceChannel() <- msg
+  } else {
+    err := p.producer.Produce(msg, p.delivery)
+    if err != nil {
+      log.Printf("Failed to enqueue the message: %v : %v, will retry in one minute", string(data), err)
+      time.Sleep(60 * time.Second)
+    }
+  }
+}
+
 func (p *TopicProducer) Setup(config *Config) {
-  p.Topic, p.config = parseKafkaConfig(config)
+  var extra map[string]interface{}
+  p.Topic, p.config, extra = parseKafkaConfig(config)
+
+  toChannel, ok := extra["to_channel"]
+  if ok {
+    p.toChannel = toChannel.(bool)
+  }
+
+  order, ok := extra["order"]
+  if ok {
+    p.Order = order.(bool)
+  }
+
   producer, err := kafka.NewProducer(p.config)
   if err != nil {
     log.Fatalf("Failed to create producer: %v", err)
   }
   p.producer = producer
+
+  if !p.Order {
+    if p.toChannel {
+      log.Println("Using unordered channel producer")
+      go func () {
+        for e:= range p.producer.Events() {
+          p.handleEvent(e)
+        }
+      }()
+    } else {
+      log.Println("Using unordered producer")
+      p.delivery = make(chan kafka.Event, 200)
+      go func() {
+        for {
+          e := <-p.delivery
+          p.handleEvent(e)
+        }
+      } ()
+    }
+  }
 }
 
 func (p *TopicProducer) Process(data []byte) {
   //TODO: This is a blocking way to wrap a non-blocking producer
   // When FIFO is not required, a pential speed up here
+  if !p.Order {
+    p.produce(data)
+    return
+  }
+
   for {
-    if p.process(data) {
+    var success bool
+    if p.toChannel {
+      success = p.process(data)
+    } else {
+      success = p.processAlt(data)
+    }
+    if success {
       return
     } else {
       log.Println("Failed to write message to kafka, will retry again")
       time.Sleep(time.Second)
+    }
+  }
+}
+
+func (p *TopicProducer) handleEvent(event kafka.Event) {
+  switch ev := event.(type) {
+  case *kafka.Message:
+    m := ev
+    if m.TopicPartition.Error != nil {
+      log.Printf("Delivery failed: %v message: %v", m.TopicPartition.Error, string(m.Value))
+      p.produce(m.Value)
+    } else {
+      log.Printf("Produced message %v", string(m.Value))
     }
   }
 }
@@ -71,8 +149,9 @@ func (p *TopicProducer) process(data []byte) bool {
   return <-sig
 }
 
-func (p *TopicProducer) processFun(data []byte) bool {
+func (p *TopicProducer) processAlt(data []byte) bool {
   delivery := make(chan kafka.Event)
+  defer close(delivery)
   err := p.producer.Produce(&kafka.Message{
     TopicPartition: kafka.TopicPartition{ Topic: &p.Topic, Partition: kafka.PartitionAny },
     Value: data,
@@ -80,9 +159,10 @@ func (p *TopicProducer) processFun(data []byte) bool {
   }, delivery)
   if err != nil {
     log.Println(err)
+    log.Printf("Can not enque message: %v, %v", string(data), err)
+    return false
   }
   e := <-delivery
-  close(delivery)
   m := e.(*kafka.Message)
   if m.TopicPartition.Error != nil {
     log.Printf("Delivery failed: %v", m.TopicPartition.Error)
@@ -93,7 +173,7 @@ func (p *TopicProducer) processFun(data []byte) bool {
 }
 
 func (c *TopicConsumer) Setup(config *Config) {
-  c.Topic, c.config = parseKafkaConfig(config)
+  c.Topic, c.config, _ = parseKafkaConfig(config)
   consumer, err := kafka.NewConsumer(c.config)
   if err != nil {
     log.Fatalf("Failed to create consumer: %v", err)
@@ -122,7 +202,7 @@ func (c *TopicConsumer) Poll(n int) *kafka.Message {
   return nil
 }
 
-func parseKafkaConfig (config *Config) (string, *kafka.ConfigMap) {
+func parseKafkaConfig (config *Config) (string, *kafka.ConfigMap, map[string]interface{}) {
   var c map[string] interface {}
   if config.Topic != nil {
     c = config.Topic
@@ -130,9 +210,21 @@ func parseKafkaConfig (config *Config) (string, *kafka.ConfigMap) {
     c = make(map[string]interface{})
   }
 
+  extra := make(map[string]interface{})
+
   topic, ok := c["topic"]
   if !ok {
       log.Fatalln("A valid topic name needs to be provided")
+  }
+
+  order, ok := c["order"]
+  if ok {
+    extra["order"] = order.(bool)
+  }
+
+  toChannel, ok := c["to_channel"]
+  if ok {
+    extra["to_channel"] = toChannel.(bool)
   }
 
   params, ok := c["params"]
@@ -151,11 +243,11 @@ func parseKafkaConfig (config *Config) (string, *kafka.ConfigMap) {
     }
   }
 
-  return topic.(string), configMap
+  return topic.(string), configMap, extra
 }
 
 func NewTopicProducer(config *Config) *TopicProducer {
-  producer := &TopicProducer {}
+  producer := &TopicProducer { toChannel: true, Order: true }
   producer.Setup(config)
 
   return producer
