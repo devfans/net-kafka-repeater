@@ -21,16 +21,8 @@ type TopicConsumer struct {
   consumer   *kafka.Consumer
 }
 
-func (p *TopicProducer) Setup(params map[string]interface{}) {
-  p.config = &kafka.ConfigMap {}
-  for k, v := range params {
-    switch value := v.(type) {
-    case float64:
-      p.config.SetKey(k, int(value))
-    default:
-      p.config.SetKey(k, value)
-    }
-  }
+func (p *TopicProducer) Setup(config *Config) {
+  p.Topic, p.config = parseKafkaConfig(config)
   producer, err := kafka.NewProducer(p.config)
   if err != nil {
     log.Fatalf("Failed to create producer: %v", err)
@@ -98,16 +90,8 @@ func (p *TopicProducer) processFun(data []byte) bool {
   return true
 }
 
-func (c *TopicConsumer) Setup(params map[string]interface{}) {
-  c.config = &kafka.ConfigMap {}
-  for k, v := range params {
-    switch value := v.(type) {
-    case float64:
-      c.config.SetKey(k, int(value))
-    default:
-      c.config.SetKey(k, value)
-    }
-  }
+func (c *TopicConsumer) Setup(config *Config) {
+  c.Topic, c.config = parseKafkaConfig(config)
   consumer, err := kafka.NewConsumer(c.config)
   if err != nil {
     log.Fatalf("Failed to create consumer: %v", err)
@@ -136,9 +120,7 @@ func (c *TopicConsumer) Poll(n int) *kafka.Message {
   return nil
 }
 
-func NewTopicProducer(config *Config) *TopicProducer {
-  producer := &TopicProducer {}
-
+func parseKafkaConfig (config *Config) (string, *kafka.ConfigMap) {
   var c map[string] interface {}
   if config.Topic != nil {
     c = config.Topic
@@ -147,9 +129,7 @@ func NewTopicProducer(config *Config) *TopicProducer {
   }
 
   topic, ok := c["topic"]
-  if ok {
-    producer.Topic = topic.(string)
-  } else {
+  if !ok {
       log.Fatalln("A valid topic name needs to be provided")
   }
 
@@ -158,33 +138,30 @@ func NewTopicProducer(config *Config) *TopicProducer {
   if ok {
     paramSet = params.(map[string]interface{})
   }
-  producer.Setup(paramSet)
+
+  configMap := &kafka.ConfigMap {}
+  for k, v := range paramSet {
+    switch value := v.(type) {
+    case float64:
+      configMap.SetKey(k, int(value))
+    default:
+      configMap.SetKey(k, value)
+    }
+  }
+
+  return topic.(string), configMap
+}
+
+func NewTopicProducer(config *Config) *TopicProducer {
+  producer := &TopicProducer {}
+  producer.Setup(config)
 
   return producer
 }
 
 func NewTopicConsumer(config *Config) *TopicConsumer {
   consumer := &TopicConsumer {}
-
-  var c map[string] interface {}
-  if config.Topic != nil {
-    c = config.Topic
-  } else {
-    c = make(map[string]interface{})
-  }
-
-  topic, ok := c["topic"]
-  if ok {
-    consumer.Topic = topic.(string)
-  } else {
-    log.Fatalln("A valid topic name needs to be provided")
-  }
-  params, ok := c["params"]
-  var paramSet map[string]interface{}
-  if ok {
-    paramSet = params.(map[string]interface{})
-  }
-  consumer.Setup(paramSet)
+  consumer.Setup(config)
 
   return consumer
 }
