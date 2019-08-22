@@ -208,6 +208,7 @@ func (r *Receiver) Start() {
   log.Printf("Mode: %v Target Address: %v", r.config.Mode, r.config.Address)
 
   if r.config.Mode == "kcp" {
+    log.Println("Using kcp mode")
     go r.startKcp()
   } else {
     go r.startTcp()
@@ -326,15 +327,13 @@ func (s *Sender) Start() {
 
   if s.config.Mode == "kcp" {
     log.Println("Using kcp mode")
+    sess.KcpConnect(s.config)
   } else {
     sess.TcpConnect(s.config)
   }
 
   sess.active = true
-  incoming := sess.conn.RemoteAddr().String()
-  log.Printf("Outgoing connection to %v", incoming)
-  ip, _, _ := net.SplitHostPort(incoming)
-  sess.Ip = ip
+  sess.Ip = s.config.Address
   sess.Login = false
   // Login
   auth := sess.MakeAuthMessage(true, s.config)
