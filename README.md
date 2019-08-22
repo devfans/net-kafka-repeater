@@ -27,9 +27,9 @@ The sender would maintain a outgoing connectin to the receiver, and when the con
 
 If `order` is true, the message received on receiver end would be delivered to the kafka message queue one by one.
 
-A kafka message delivery failure would normal trigger a new delivery and no message loss is not guaranteed.
+A kafka message delivery failure would normal trigger a new delivery but no message loss is not guaranteed.
 
-However, the 'ack' flag is for this purpose(Not implemented). The idea is the sender needs to receive delivery success ack message for each kafka message before sending out the next message, but the performance and efficiency could be lower.
+However, the 'ack' flag is for this purpose(Not implemented yet). The idea is the sender needs to receive delivery success ack message for each kafka message before sending out the next message, but the performance and efficiency could be lower.
 
 ## Networking
 
