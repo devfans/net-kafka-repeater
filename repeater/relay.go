@@ -98,6 +98,17 @@ func (sess *Session) connect(config *RelayConfig) bool {
     return false
   }
   sess.active = true
+  incoming := sess.conn.RemoteAddr().String()
+  log.Printf("Outgoing connection to %v", incoming)
+  ip, _, _ := net.SplitHostPort(incoming)
+
+  sess.Ip = ip
+  sess.Login = false
+  // Login
+  auth := sess.MakeAuthMessage(true, config)
+  sess.Send(auth)
+  log.Println("Sent login request")
+
   return true
 }
 
@@ -353,17 +364,6 @@ func (s *Sender) Start() {
   }
 
   sess.Connect(s.config)
-  incoming := sess.conn.RemoteAddr().String()
-  log.Printf("Outgoing connection from %v", incoming)
-  ip, _, _ := net.SplitHostPort(incoming)
-
-  sess.Ip = ip
-  sess.Login = false
-  // Login
-  auth := sess.MakeAuthMessage(true, s.config)
-  sess.Send(auth)
-  log.Println("Sent login request")
-
   // test
   go func() {
     for {
