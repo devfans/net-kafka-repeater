@@ -373,6 +373,8 @@ func (s *Sender) Start() {
         _, err := sess.Send(data)
         if err != nil {
           log.Println(err)
+        } else {
+          log.Println("Sent test")
         }
       }
     }
