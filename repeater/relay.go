@@ -247,10 +247,19 @@ func (r *Receiver) handleTcpSession(cs *TcpSession, producer *TopicProducer) err
   buf := bufio.NewReaderSize(cs.conn, MAX_BUF_SIZE)
   var msg [MAX_MSG_SIZE]byte
   for {
+    log.Println("Peeking")
     meta, err := buf.Peek(6)
     log.Println(meta)
     if err != nil {
-      continue
+      log.Println(err)
+      time.Sleep(time.Second)
+      _, err = cs.Send([]byte("ping"))
+      if err != nil {
+        log.Println("Client connection closed")
+        return err
+      } else {
+        continue
+      }
     }
     size := b2i(meta[2:6])
     if uint32(buf.Buffered()) >= size {
