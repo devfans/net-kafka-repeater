@@ -13,6 +13,7 @@
   "topic": {
     "topic": "xxxxx",
     "order": true,
+    "to_channel": true,
     "params": {
       "bootstrap.servers": "127.0.0.1:9092"
     }
