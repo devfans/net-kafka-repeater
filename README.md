@@ -11,7 +11,7 @@ When the receive get a message from sender it will deliver it to the local kafka
 
 FLAG(2 bytes) + SIZE(4 bytes) + ID(4 bytes) + DATA
 
-`FLAG` specifies the message type, it's authentication request of a valid data message
+`FLAG` specifies the message type: a authentication request or a valid data message
 `ID`   is a random `uint32` to identify the message for confirmation from receiver(Not implemented yet)
 
 
