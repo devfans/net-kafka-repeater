@@ -9,6 +9,7 @@ import (
   "errors"
 
   "math/rand"
+  "github.com/xtaci/kcp-go"
   "github.com/confluentinc/confluent-kafka-go/kafka"
 )
 
@@ -68,19 +69,15 @@ type Sender struct {
 }
 
 type Session struct {
-  Login         bool
+  conn          net.Conn
+
   Ip            string
-}
-
-type TcpSession struct {
-  conn          *net.TCPConn
-
-  Sess          *Session
   active        bool
+  Login         bool
   sigs          chan bool
 }
 
-func (sess *TcpSession) connect(config *RelayConfig) {
+func (sess *Session) connectTcp(config *RelayConfig) {
   if sess.active {
     return
   }
@@ -91,27 +88,18 @@ func (sess *TcpSession) connect(config *RelayConfig) {
     sess.sigs <- false
     return
   }
-  sess.conn = conn.(*net.TCPConn)
+  conn.(*net.TCPConn).SetKeepAlive(true)
 
-  sess.active = true
-  sess.conn.SetKeepAlive(true)
-  incoming := conn.RemoteAddr().String()
-  log.Printf("Outgoing connection to %v", incoming)
-  ip, _, _ := net.SplitHostPort(incoming)
-  sess.Sess.Ip = ip
-  sess.Sess.Login = false
-  // Login
-  auth := sess.Sess.MakeAuthMessage(true, config)
-  sess.Send(auth)
-  log.Println("Sent login request")
+  sess.conn = conn
+
 }
 
-func (sess *TcpSession) SendMessage(data []byte) (int, error) {
-  msg := sess.Sess.MakeMessage(data)
+func (sess *Session) SendMessage(data []byte) (int, error) {
+  msg := sess.MakeMessage(data)
   return sess.Send(msg)
 }
 
-func (sess *TcpSession) Send(data []byte) (int, error) {
+func (sess *Session) Send(data []byte) (int, error) {
   n, err := sess.conn.Write(data)
   if err != nil {
     sess.Close()
@@ -123,24 +111,32 @@ func (sess *TcpSession) Send(data []byte) (int, error) {
   return n, err
 }
 
-func (sess *TcpSession) ClientInit(config *RelayConfig) {
+func (sess *Session) TcpConnect(config *RelayConfig) {
   go func(sigs chan bool) {
     init := true
     for {
       if init {
         init = false
-        sess.connect(config)
+        sess.connectTcp(config)
       } else {
         <-sigs
         log.Printf("Connection broken detected, will reconnection in 2 seconds")
         time.Sleep(2 * time.Second)
-        sess.connect(config)
+        sess.connectTcp(config)
       }
     }
   } (sess.sigs)
 }
 
-func (cs *Session) MakeAuthMessage (login bool, config *RelayConfig) []byte {
+func (sess *Session) KcpConnect(config *RelayConfig) {
+  var err error
+  sess.conn, err = kcp.Dial(config.Address)
+  if err != nil {
+    log.Fatalln("Failed to init kcp session: ", err)
+  }
+}
+
+func (sess *Session) MakeAuthMessage (login bool, config *RelayConfig) []byte {
   msg := []byte{ byte((AUTH >> 8) & 0xff), byte(AUTH & 0xff)}
   if login {
     data := []byte(config.Password)
@@ -154,14 +150,14 @@ func (cs *Session) MakeAuthMessage (login bool, config *RelayConfig) []byte {
   return msg
 }
 
-func (cs *Session) MakeAckMessage (id []byte) []byte {
+func (sess *Session) MakeAckMessage (id []byte) []byte {
   msg := []byte{ byte((DATA >> 8) & 0xff), byte(DATA & 0xff)}
   msg = append(msg, i2b(10)...)
   msg = append(msg, id...)
   return msg
 }
 
-func (cs *Session) MakeMessage (data []byte) []byte {
+func (sess *Session) MakeMessage (data []byte) []byte {
   msg := []byte{ byte((DATA >> 8) & 0xff), byte(DATA & 0xff)}
   msg = append(msg, i2b(uint32(10 + len(data)))...)
   msg = append(msg, i2b(rand.Uint32())...)
@@ -169,7 +165,7 @@ func (cs *Session) MakeMessage (data []byte) []byte {
   return msg
 }
 
-func (cs *Session) Handle (data []byte, size uint32, config *RelayConfig) (bool, []byte, error) {
+func (sess *Session) Handle (data []byte, size uint32, config *RelayConfig) (bool, []byte, error) {
   flag := uint32(data[0]) << 8
   flag += uint32(data[1])
 
@@ -177,36 +173,69 @@ func (cs *Session) Handle (data []byte, size uint32, config *RelayConfig) (bool,
     password := string(data[10:])
     if password != config.Password {
       log.Printf("Invalid password: %v", password)
-      cs.Login = false
-      return false, cs.MakeAuthMessage(false, config), errors.New("Authentication Failure")
+      sess.Login = false
+      return false, sess.MakeAuthMessage(false, config), errors.New("Authentication Failure")
     } else {
-      cs.Login = true
-      log.Printf("Sender login success from %v", cs.Ip)
+      sess.Login = true
+      log.Printf("Sender login success from %v", sess.Ip)
       return false, nil, nil
     }
   }
-  if !cs.Login {
-    return false, cs.MakeAuthMessage(false, config), errors.New("Login required")
+  if !sess.Login {
+    return false, sess.MakeAuthMessage(false, config), errors.New("Login required")
   }
   if flag == DATA {
     log.Printf("New message: %v", string(data[6:]))
-    return true, cs.MakeAckMessage(data[6:10]), nil
+    return true, sess.MakeAckMessage(data[6:10]), nil
   } else {
     return false, nil, errors.New("Invalid data flag")
   }
 }
 
-func (cs *TcpSession) Close() {
-  if cs.conn != nil {
-    cs.conn.Close()
+func (sess *Session) Close() {
+  if sess.conn == nil {
+    return
+  }
+  switch c := sess.conn.(type) {
+  case *net.TCPConn:
+    c.Close()
+  case *kcp.UDPSession:
+    c.Close()
   }
 }
 
 func (r *Receiver) Start() {
   log.Printf("Mode: %v Target Address: %v", r.config.Mode, r.config.Address)
 
-  if r.config.Mode == "tcp" {
+  if r.config.Mode == "kcp" {
+    go r.startKcp()
+  } else {
     go r.startTcp()
+  }
+}
+
+func (r *Receiver) startKcp() {
+  server, err := kcp.Listen(r.config.Address)
+  if err != nil {
+    log.Fatalln("Failed to listen: ", err)
+  }
+  defer server.Close()
+  for {
+    conn, err := server.Accept()
+    if err != nil {
+      continue
+    }
+    incoming := conn.RemoteAddr().String()
+    log.Printf("Incoming connection from %v", incoming)
+    ip, _, _ := net.SplitHostPort(incoming)
+    sess := &Session { Ip: ip, Login: false, conn: conn, active: true }
+    go func (cs *Session) {
+      csErr := r.handleSession(cs, r.producer)
+      if csErr != nil {
+        log.Println(err)
+        cs.Close()
+      }
+    }(sess)
   }
 }
 
@@ -218,7 +247,7 @@ func (r *Receiver) startTcp() {
 
   server, err := net.ListenTCP("tcp", addr)
   if err != nil {
-    log.Fatalln("Failed to listen: %v", err)
+    log.Fatalf("Failed to listen: %v", err)
   }
   defer server.Close()
 
@@ -231,19 +260,18 @@ func (r *Receiver) startTcp() {
     incoming := conn.RemoteAddr().String()
     log.Printf("Incoming connection from %v", incoming)
     ip, _, _ := net.SplitHostPort(incoming)
-    sess := &Session { Ip: ip, Login: false }
-    tcpSess := &TcpSession { Sess: sess, conn: conn, active: true }
-    go func (cs *TcpSession) {
-      csErr := r.handleTcpSession(cs, r.producer)
+    sess := &Session { Ip: ip, Login: false, conn: conn, active: true }
+    go func (cs *Session) {
+      csErr := r.handleSession(cs, r.producer)
       if csErr != nil {
         log.Println(err)
         cs.Close()
       }
-    }(tcpSess)
+    }(sess)
   }
 }
 
-func (r *Receiver) handleTcpSession(cs *TcpSession, producer *TopicProducer) error {
+func (r *Receiver) handleSession(cs *Session, producer *TopicProducer) error {
   buf := bufio.NewReaderSize(cs.conn, MAX_BUF_SIZE)
   var msg [MAX_MSG_SIZE]byte
   for {
@@ -272,7 +300,7 @@ func (r *Receiver) handleTcpSession(cs *TcpSession, producer *TopicProducer) err
       if err != nil {
         return err
       }
-      arrive, res, err := cs.Sess.Handle(data, size, r.config)
+      arrive, res, err := cs.Handle(data, size, r.config)
       if arrive {
         log.Printf("Received message: %v", string(data[10:]))
         producer.Process(data[10:])
@@ -292,10 +320,40 @@ func (r *Receiver) handleTcpSession(cs *TcpSession, producer *TopicProducer) err
 
 func (s *Sender) Start() {
   log.Printf("Mode: %v Target Address: %v", s.config.Mode, s.config.Address)
+  sigs := make(chan bool, 1)
+  sess := &Session { Login: false, sigs: sigs }
+  s.cs = sess
 
-  if s.config.Mode == "tcp" {
-    go s.startTcp()
+  if s.config.Mode == "kcp" {
+    log.Println("Using kcp mode")
+  } else {
+    sess.TcpConnect(s.config)
   }
+
+  sess.active = true
+  incoming := sess.conn.RemoteAddr().String()
+  log.Printf("Outgoing connection to %v", incoming)
+  ip, _, _ := net.SplitHostPort(incoming)
+  sess.Ip = ip
+  sess.Login = false
+  // Login
+  auth := sess.MakeAuthMessage(true, s.config)
+  sess.Send(auth)
+  log.Println("Sent login request")
+
+  // test
+  go func() {
+    for {
+      time.Sleep(time.Second)
+      if sess.active {
+        data := sess.MakeMessage([]byte("Testing"))
+        _, err := sess.Send(data)
+        if err != nil {
+          log.Println(err)
+        }
+      }
+    }
+  } ()
 
   for {
     msg := s.consumer.Poll(100)
@@ -315,26 +373,6 @@ func (s *Sender) Process(msg *kafka.Message) {
     } else {
       log.Printf("Transfered message: %v", string(msg.Value))
       return
-    }
-  }
-}
-
-func (s *Sender) startTcp() {
-  sess := &Session { Login: false }
-  sigs := make(chan bool, 1)
-  tcpSess := &TcpSession { Sess: sess, sigs: sigs }
-  tcpSess.ClientInit(s.config)
-  s.cs = tcpSess
-
-  // test
-  for {
-    time.Sleep(time.Second)
-    if tcpSess.active {
-      data := tcpSess.Sess.MakeMessage([]byte("Testing"))
-      _, err := tcpSess.Send(data)
-      if err != nil {
-        log.Println(err)
-      }
     }
   }
 }
