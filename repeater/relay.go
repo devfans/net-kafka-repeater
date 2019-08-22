@@ -247,7 +247,6 @@ func (r *Receiver) handleTcpSession(cs *TcpSession, producer *TopicProducer) err
   buf := bufio.NewReaderSize(cs.conn, MAX_BUF_SIZE)
   var msg [MAX_MSG_SIZE]byte
   for {
-    log.Println("Peeking")
     meta, err := buf.Peek(6)
     log.Println(meta)
     if err != nil {

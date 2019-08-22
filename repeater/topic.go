@@ -45,6 +45,7 @@ func (p *TopicProducer) Process(data []byte) {
 
 func (p *TopicProducer) process(data []byte) bool {
   sig := make(chan bool)
+  defer close(sig)
   go func () {
     for e:= range p.producer.Events() {
       switch ev := e.(type) {
@@ -57,6 +58,7 @@ func (p *TopicProducer) process(data []byte) bool {
           log.Printf("Produced message %v", string(m.Value))
           sig <- true
         }
+        return
       }
     }
   }()
