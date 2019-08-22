@@ -111,13 +111,14 @@ func (sess *Session) Send(data []byte) (int, error) {
   return n, err
 }
 
-func (sess *Session) TcpConnect(config *RelayConfig) {
+func (sess *Session) TcpConnect(config *RelayConfig, init chan bool) {
   go func(sigs chan bool) {
-    init := true
+    starting := true
     for {
-      if init {
-        init = false
+      if starting {
+        starting = false
         sess.connectTcp(config)
+        init <- true
       } else {
         <-sigs
         log.Printf("Connection broken detected, will reconnection in 2 seconds")
@@ -325,15 +326,22 @@ func (s *Sender) Start() {
   sess := &Session { Login: false, sigs: sigs }
   s.cs = sess
 
+
   if s.config.Mode == "kcp" {
     log.Println("Using kcp mode")
     sess.KcpConnect(s.config)
   } else {
-    sess.TcpConnect(s.config)
+    init := make(chan bool)
+    sess.TcpConnect(s.config, init)
+    <-init
   }
 
   sess.active = true
-  sess.Ip = s.config.Address
+  incoming := sess.conn.RemoteAddr().String()
+  log.Printf("Outgoing connection from %v", incoming)
+  ip, _, _ := net.SplitHostPort(incoming)
+
+  sess.Ip = ip
   sess.Login = false
   // Login
   auth := sess.MakeAuthMessage(true, s.config)
