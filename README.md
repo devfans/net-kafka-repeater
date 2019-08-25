@@ -5,7 +5,7 @@ A kafka message repeater with data transferred via the Internet (TCP/UDP).
 
 The repeater is desgined to tranfer messages to a remote location and rewrite the message to the kafka message queue.
 The sender would subscribe to a topic and when a message is fetched from the queue, it will send it out to the receiver.
-When the receive get a message from sender it will deliver it to the local kafka message queue.
+When the receiver get a message from sender it will deliver it to the local kafka message queue.
 
 ## Data packet structure
 
