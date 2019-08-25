@@ -12,6 +12,7 @@ When the receiver get a message from sender it will deliver it to the local kafk
 FLAG(2 bytes) + SIZE(4 bytes) + ID(4 bytes) + DATA
 
 `FLAG` specifies the message type: a authentication request or a valid data message
+
 `ID`   is a random `uint32` to identify the message for confirmation from receiver(Not implemented yet)
 
 
@@ -25,9 +26,9 @@ The connection is not secured with encryption by default.
 
 The sender would maintain a outgoing connectin to the receiver, and when the connection is broken, it'll retry again later.
 
-If `order` is true, the message received on receiver end would be delivered to the kafka message queue one by one.
+If `order` is true, the messages received on receiver end would be delivered to the kafka message queue one by one.
 
-A kafka message delivery failure would normal trigger a new delivery but no message loss is not guaranteed.
+A kafka message delivery failure would normally trigger a new delivery but no message loss is not guaranteed.
 
 However, the 'ack' flag is for this purpose(Not implemented yet). The idea is the sender needs to receive delivery success ack message for each kafka message before sending out the next message, but the performance and efficiency could be lower.
 
