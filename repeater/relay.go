@@ -358,6 +358,14 @@ func (r *Receiver) handleSession(cs *Session, producer *TopicProducer) error {
         continue
       }
     }
+    // Check flag to filer unknown packets
+    flag := uint32(meta[0]) << 8
+    flag += uint32(meta[1])
+    if flag != AUTH && flag != DATA {
+      log.Println("Invalid packets:", meta)
+      return errors.New("Invalid packet flag")
+    }
+
     size := b2i(meta[2:6])
     if uint32(buf.Buffered()) >= size {
       var data []byte
